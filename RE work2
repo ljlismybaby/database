@@ -1,0 +1,251 @@
+from flask import Flask, render_template, request, redirect, url_for, flash
+import sqlite3
+from pathlib import Path
+
+app = Flask(__name__)
+app.secret_key = "university-database-demo-key"
+
+BASE_DIR = Path(__file__).resolve().parent
+
+DATABASES = {
+    "students": {
+        "file": BASE_DIR / "students.db",
+        "table": "students",
+        "title": "Students Database",
+        "fields": [("name", "Student Name"), ("email", "Email"), ("major", "Major")],
+    },
+    "courses": {
+        "file": BASE_DIR / "courses.db",
+        "table": "courses",
+        "title": "Courses Database",
+        "fields": [("name", "Course Name"), ("code", "Course Code"), ("credits", "Credits")],
+    },
+    "staff": {
+        "file": BASE_DIR / "staff.db",
+        "table": "staff",
+        "title": "Staff Database",
+        "fields": [("name", "Staff Name"), ("email", "Email"), ("position", "Position")],
+    },
+}
+
+
+def connect_db(database_key):
+    """Connect to the selected independent SQLite database."""
+    db_path = DATABASES[database_key]["file"]
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_databases():
+    """Create the three database files, tables, and initial dummy data."""
+    schemas = {
+        "students": """
+            CREATE TABLE IF NOT EXISTS students (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                major TEXT NOT NULL
+            )
+        """,
+        "courses": """
+            CREATE TABLE IF NOT EXISTS courses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                code TEXT NOT NULL,
+                credits INTEGER NOT NULL
+            )
+        """,
+        "staff": """
+            CREATE TABLE IF NOT EXISTS staff (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                position TEXT NOT NULL
+            )
+        """,
+    }
+
+    dummy_data = {
+        "students": [
+            ("Alice Johnson", "alice@example.com", "Computer Science"),
+            ("Bob Smith", "bob@example.com", "Information Technology"),
+            ("Chen Wei", "chen@example.com", "Business Administration"),
+        ],
+        "courses": [
+            ("Database Systems", "CS201", 5),
+            ("Programming Fundamentals", "CS101", 5),
+            ("Data Networks", "IT202", 4),
+        ],
+        "staff": [
+            ("John Brown", "john.brown@example.com", "Lecturer"),
+            ("Mary Wilson", "mary.wilson@example.com", "Administrator"),
+            ("David Lee", "david.lee@example.com", "Professor"),
+        ],
+    }
+
+    for key, database in DATABASES.items():
+        connection = sqlite3.connect(database["file"])
+        try:
+            connection.execute(schemas[key])
+            count = connection.execute(
+                f"SELECT COUNT(*) FROM {database['table']}"
+            ).fetchone()[0]
+
+            # Insert sample records only when the table is empty.
+            if count == 0:
+                columns = [field[0] for field in database["fields"]]
+                placeholders = ", ".join("?" for _ in columns)
+                column_names = ", ".join(columns)
+                connection.executemany(
+                    f"INSERT INTO {database['table']} ({column_names}) "
+                    f"VALUES ({placeholders})",
+                    dummy_data[key],
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+
+@app.route("/")
+def index():
+    database_key = request.args.get("database", "students")
+    if database_key not in DATABASES:
+        database_key = "students"
+
+    database = DATABASES[database_key]
+    search = request.args.get("search", "").strip()
+
+    with connect_db(database_key) as connection:
+        if search:
+            searchable_columns = [field[0] for field in database["fields"]]
+            conditions = " OR ".join(
+                f"CAST({column} AS TEXT) LIKE ?" for column in searchable_columns
+            )
+            parameters = [f"%{search}%"] * len(searchable_columns)
+            records = connection.execute(
+                f"SELECT * FROM {database['table']} WHERE {conditions} ORDER BY id",
+                parameters,
+            ).fetchall()
+        else:
+            records = connection.execute(
+                f"SELECT * FROM {database['table']} ORDER BY id"
+            ).fetchall()
+
+    return render_template(
+        "index.html",
+        databases=DATABASES,
+        database_key=database_key,
+        database=database,
+        records=records,
+        search=search,
+    )
+
+
+@app.route("/add", methods=["POST"])
+def add_record():
+    database_key = request.form.get("database", "students")
+    if database_key not in DATABASES:
+        flash("Invalid database selected.", "error")
+        return redirect(url_for("index"))
+
+    database = DATABASES[database_key]
+    columns = [field[0] for field in database["fields"]]
+    values = [request.form.get(column, "").strip() for column in columns]
+
+    if any(value == "" for value in values):
+        flash("Please fill in every field.", "error")
+        return redirect(url_for("index", database=database_key))
+
+    if database_key == "courses":
+        try:
+            values[2] = int(values[2])
+            if values[2] <= 0:
+                raise ValueError
+        except ValueError:
+            flash("Credits must be a positive whole number.", "error")
+            return redirect(url_for("index", database=database_key))
+
+    column_names = ", ".join(columns)
+    placeholders = ", ".join("?" for _ in columns)
+
+    with connect_db(database_key) as connection:
+        connection.execute(
+            f"INSERT INTO {database['table']} ({column_names}) VALUES ({placeholders})",
+            values,
+        )
+        connection.commit()
+
+    flash("Record added successfully.", "success")
+    return redirect(url_for("index", database=database_key))
+
+
+@app.route("/edit/<int:record_id>", methods=["POST"])
+def edit_record(record_id):
+    database_key = request.form.get("database", "students")
+    if database_key not in DATABASES:
+        flash("Invalid database selected.", "error")
+        return redirect(url_for("index"))
+
+    database = DATABASES[database_key]
+    columns = [field[0] for field in database["fields"]]
+    values = [request.form.get(column, "").strip() for column in columns]
+
+    if any(value == "" for value in values):
+        flash("Please fill in every field.", "error")
+        return redirect(url_for("index", database=database_key))
+
+    if database_key == "courses":
+        try:
+            values[2] = int(values[2])
+            if values[2] <= 0:
+                raise ValueError
+        except ValueError:
+            flash("Credits must be a positive whole number.", "error")
+            return redirect(url_for("index", database=database_key))
+
+    assignments = ", ".join(f"{column} = ?" for column in columns)
+
+    with connect_db(database_key) as connection:
+        cursor = connection.execute(
+            f"UPDATE {database['table']} SET {assignments} WHERE id = ?",
+            values + [record_id],
+        )
+        connection.commit()
+
+    if cursor.rowcount:
+        flash("Record updated successfully.", "success")
+    else:
+        flash("Record not found.", "error")
+
+    return redirect(url_for("index", database=database_key))
+
+
+@app.route("/delete/<int:record_id>", methods=["POST"])
+def delete_record(record_id):
+    database_key = request.form.get("database", "students")
+    if database_key not in DATABASES:
+        flash("Invalid database selected.", "error")
+        return redirect(url_for("index"))
+
+    database = DATABASES[database_key]
+    with connect_db(database_key) as connection:
+        cursor = connection.execute(
+            f"DELETE FROM {database['table']} WHERE id = ?",
+            (record_id,),
+        )
+        connection.commit()
+
+    if cursor.rowcount:
+        flash("Record deleted successfully.", "success")
+    else:
+        flash("Record not found.", "error")
+
+    return redirect(url_for("index", database=database_key))
+
+
+if __name__ == "__main__":
+    initialize_databases()
+    print("University Database Manager is running.")
+    print("Open http://127.0.0.1:5000 in your browser.")
+    app.run(debug=True)
